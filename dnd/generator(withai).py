@@ -4,98 +4,23 @@ import textwrap
 from functools import partial
 import PyPDF2
 import os
-import sys
 from customtkinter import *
 import customtkinter as ctk
 import tkinter as tk
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
-from PIL import Image
-from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
 import json
-
-
-
-def show_main_menu():
-    """Zobrazí hlavní menu aplikace."""
-    ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("blue")
-    root = ctk.CTk()
-    root.geometry("400x300")
-    root.title("🛡️ DnD Generátor Postav")
-    def safe_destroy():
-      root.after(200, root.destroy)
-
-    ctk.CTkLabel(root, text="Hello in DND generator!", font=("Arial", 20)).pack(pady=20)
-    ctk.CTkButton(root, text="🎲 Vytvořit novou postavu", command=lambda: [root.after(150,safe_destroy), generate_character()]).pack(pady=10)
-    # ctk.CTkButton(root, text="📂 Načíst postavu ze souboru", command=lambda: [load_character_from_json()]).pack(pady=10)
-    ctk.CTkButton(root, text="❌ Konec", command=sys.exit).pack(pady=10)
-
-    try:
-      root.mainloop()
-    except Exception as e:
-        if any(sub in str(e) for sub in [
-          "click_animation", "dpi_scaling", "invalid command name", "after script"]):
-          print("⚠️ Potlačená systémová chyba:", e)
-        else:
-          raise
-
-
-
-# def load_character_from_json():
-#     file_path = filedialog.askopenfilename(
-#         title="Vyber JSON soubor postavy",
-#         filetypes=[("JSON soubory", "*.json")]
-#     )
-#     if not file_path:
-#         return
-
-#     with open(file_path, "r") as f:
-#         data = json.load(f)
-
-#     race = races.get(data["race"])
-
-#     # Convert class name string to class object
-#     char_class = next((cls for cls in classes if getattr(cls, "name", None) == data["class"]), None)
-
-#     background = next((bg for bg in backgrounds if getattr(bg, "name", None) == data["background"]), None)
-
-#     character = Character(
-#         name=data["name"],
-#         race=race,
-#         char_class=char_class,
-#         background=background,
-#         hit_dice=hit_dice,
-#         skills=[],
-#         traits=[],
-#         generate_items=generate_items
-#     )
-
-#     character.stats = data["stats"]
-#     stats_with_race = race.apply_modifiers(character.stats)
-#     character.stats = stats_with_race
-#     character.inventory = [item if isinstance(item, str) else getattr(item, "name", str(item)) for item in data.get("inventory", [])]
-#     character.portrait = data.get("portrait")
-#     character.path = data.get("path")
-#     character.features = data.get("features", [])
-#     character.trait = data.get("traits", [])
-#     character.skills = data.get("skills", [])
-#     character.spells = data.get("spells", {})
-#     char_class = classes.get(data["class"])
-#     # Apply class-specific bonuses
-#     if hasattr(char_class, "apply_class_bonus"):
-#         char_class.apply_class_bonus(character)
-#     show_character_options(character)
-
-
-
-
+import requests
+import base64
+import time
+import threading
 
 "Gui pro bazove charackteristiky"
 def choose_option_gui(options, title="Vyber možnost"):
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
-    
+    ctk.set_widget_scaling(1.0)
 
     root = ctk.CTk()
     root.title(title)
@@ -218,10 +143,10 @@ def calculate_hit_points(char_class, constitution_mod):
         raise ValueError(f"Neplatný formát hit dice: {dice}")
     return dice, max_hp
 
-#4d6 roll lowest logika (statu muze byt vice nez point buy)
 def roll_single_stat_animation(label, callback):
-    roll_cycles = random.randint(10, 20)  
+    roll_cycles = random.randint(10, 20)  # kolik krát čísla "točit"
     rolls = []
+
     def animate(cycle=0):
         nonlocal rolls
         rolls = [random.randint(1, 6) for _ in range(4)]
@@ -566,11 +491,634 @@ def generate_items(char_class_name):
 
     return items  + [potion, magic_item]
 
-def choose_portrait_gui(race, gender):
+def generate_character_image(race, char_class, gender, output_path="character.png", auto_save_to_portraits=True, callback=None):
+    """
+    Generuje obrázek postavy pomocí Stable Diffusion API a ukládá ho.
+    
+    Args:
+        race: Rasa postavy (objekt nebo string)
+        char_class: Třída postavy (objekt nebo string)
+        gender: Pohlaví postavy (string, např. "Muž" nebo "Žena")
+        output_path: Cesta k výstupnímu souboru (výchozí: "character.png")
+        auto_save_to_portraits: Zda automaticky uložit do adresáře portraits (výchozí: True)
+        callback: Volitelná callback funkce pro aktualizaci stavu generování
+    
+    Returns:
+        str: Cesta k vygenerovanému obrázku, nebo None při selhání
+    """
+    # Získání názvu rasy (buď z objektu, nebo jako string)
+    race_name = getattr(race, "name", str(race))
+    # Získání názvu třídy (buď z objektu, nebo jako string)
+    class_name = getattr(char_class, "name", str(char_class))
+    
+    # Definice detailních popisů ras
+    race_descriptions = {
+        "Human": "human with balanced features, natural appearance, diverse ethnicity, distinctive cultural clothing, versatile armor preferences, adaptable style reflecting diverse heritage",
+        "Elf": "elf with long pointed ears, elegant slender features, high cheekbones, almond-shaped luminous eyes, graceful posture, flowing hair with intricate braids, ethereal appearance, flowing nature-inspired garments, light elegant armor adorned with silver and gold, ancient elven runes",
+        "Dwarf": "dwarf with stocky powerful build, prominent braided beard with metal decorations, strong angular facial features, rugged weathered skin, broad shoulders, intricate clan tattoos, heavy ornate metal armor with geometric patterns, traditional dwarven runes, gem-inlaid accessories",
+        "Halfling": "halfling with small stature, youthful appearance, cheerful expression, round face, slightly pointed ears, curly hair, nimble posture, practical colorful clothing, natural leather accessories, barefoot or light footwear, comfortable garments with earth tones",
+        "Dragonborn": "dragonborn with dragon-like scaled face, prominent horns, reptilian slit pupils, sharp teeth, scaled skin with iridescent sheen, powerful draconic presence, intimidating posture, dragon-scale armor patterns, tribal markings, ancestral decorations, ancient draconic symbols",
+        "Gnome": "gnome with small compact features, disproportionately large head, large expressive curious eyes, pointed ears, wild inventive hairstyle, clever smile, eccentric colorful garments with numerous pockets and gadgets, inventive mechanical accessories, leather aprons, tinkerer's tools",
+        "Half-Elf": "half-elf with moderately pointed ears, refined features blending human and elven traits, captivating eyes, balanced facial proportions, adaptable style combining cultural elements, versatile armor with both elven elegance and human practicality, mixed cultural symbols",
+        "Half-Orc": "half-orc with visible tusks, strong pronounced jaw, prominent brow ridge, battle scars, muscular imposing build, tribal tattoos, intimidating gaze, primal fierce appearance, heavy utilitarian armor with tribal decorations, trophy necklaces, leather and fur accents, tribal markings",
+        "Tiefling": "tiefling with distinctive curved horns, unusual vibrant colored eyes, slightly demonic features, unique skin in shades of red or purple, subtle scales, faint shadowy aura, elegant yet mysterious appearance, dark ornate clothing with infernal motifs, arcane symbols, jewelry with hidden meanings",
+        "Gith": "gith with elongated angular features, gaunt sunken face, yellow-green skin, severe expression, alien appearance, sharp cheekbones, hollow eyes, psionic presence, otherworldly aura, strange geometric patterns in clothing, ornate mind-blade decorations, interdimensional symbols, exotic alien armor"
+    }
+    
+    # Definice vybavení a oblečení podle tříd
+    class_equipment = {
+        "Fighter": "wielding a masterfully crafted longsword and ornate kite shield, wearing gleaming plate armor or fine chainmail with family crest, battle-scarred warrior appearance, battle-ready stance, determined gaze, armored gauntlets, weapon belt with multiple blades, military medal decorations, battlefield background with war banners",
+        "Wizard": "holding an ancient gnarled magic staff crackling with arcane energy or enchanted wand with glowing crystal, wearing ornate embroidered robes with intricate arcane symbols and constellations, spellbook with glowing runes visible, magical aura surrounding body, mystical spell effects swirling around hands, scholarly elements, arcane laboratory or magical library in background",
+        "Rogue": "wearing supple shadow-crafted leather armor with multiple hidden pockets, concealed poisoned daggers, dark hooded assassin's cloak, lockpicks visible on belt, stealthy predatory appearance, cunning calculating expression, coin purse or stolen jewel, urban shadows or alleyway background, half-hidden face, throwing knives",
+        "Cleric": "wearing religious symbols of deity prominently displayed, radiant divine armor with holy inscriptions, sacred holy symbol glowing on chest, emanating divine healing light, blessed appearance with serene expression, prayer book or sacred text, temple or shrine background, divine magic effects, ceremonial regalia, holy water vial",
+        "Barbarian": "exceptional muscular build with tribal ritual scarification, war paint in clan patterns, minimal armor revealing battle scars, fierce primal expression, wild untamed appearance, massive greataxe or maul dripping with blood, tribal totems, animal fur decorations, trophy necklace, wilderness or tribal camp background",
+        "Sorcerer": "crackling arcane energy surrounding hands and eyes, vibrant magical aura with color matching sorcerous origin, elegant revealing robes with draconic or storm symbolism, confident powerful stance, innate magic visibly coursing through veins, no spellbook needed, wild magic effects surrounding body, dramatic storm or arcane background",
+        "Paladin": "resplendent holy armor emblazoned with religious symbols, righteous determined expression, divine enchanted weapon glowing with sacred light, brilliant radiant aura, noble heroic bearing, oath symbols, crusader tabard, holy relic, warhorse or cathedral background, sacred vows inscribed, banner of faith",
+        "Ranger": "practical wilderness-crafted clothing in forest colors, masterwork bow and full quiver, animal companion nearby (wolf/hawk/panther), naturalistic woodsman appearance, alert vigilant expression, twin hunting knives, beast trophies, tracking tools, wilderness survival gear, forest or mountain background",
+        "Druid": "clothing woven with living natural elements, ancient twisted wooden staff topped with natural focus, leaves and flowering vines growing as decoration around body, mystical primal appearance, animal aspects, wild-shaped partial transformations, glowing nature magic, sacred grove or ancient forest background",
+        "Warlock": "eldritch symbols glowing on skin, mysterious otherworldly pendant of patron, visible otherworldly patron influences (tentacles/chains/flames), forbidden arcane markings on face and hands, haunted knowing eyes with strange color, eldritch blast energy, grimoire of forbidden knowledge, supernatural atmosphere, ominous background with patron elements",
+        "Monk": "simple yet elegant meditation robes revealing trained physique, disciplined poised stance, serene focused expression, martial arts pose with glowing ki energy around hands and feet, spiritual enlightened appearance, monastery beads or prayer wraps, specialized martial weapons, mountain temple or training ground background",
+        "Bard": "playing masterfully crafted magical musical instrument, flamboyant colorful clothing with intricate tailoring, charismatic charming smile, artistic performance appearance, expressive face, visible musical notes or magic, storytelling elements, audience or tavern background, colorful outfit with theatrical flair, inspiring presence"
+    }
+    
+    # Konzistentní umělecké styly pro profesionální vzhled
+    art_styles = [
+        "digital art by Greg Rutkowski and Artgerm",
+        "fantasy illustration by Jesper Ejsing and Tyler Jacobson",
+        "concept art by Craig Mullins and Wylie Beckert",
+        "professional D&D character art from 5th Edition Player's Handbook",
+        "high quality fantasy portrait by Charlie Bowater and Alena Aenami",
+        "epic character illustration from official D&D artbook",
+        "realistic fantasy digital art by Donato Giancola and Justin Gerard",
+        "masterwork portrait in the style of Wizards of the Coast official art",
+        "professional fantasy character illustration by Wayne Reynolds and Svetlin Velinov",
+        "detailed RPG character art in the style of Pathfinder and D&D official illustrations",
+        "fantasy character portrait rendered in the style of Magic: The Gathering card art"
+    ]
+    
+    # Kompoziční směrnice pro lepší portréty
+    compositions = [
+        "head and shoulders portrait with detailed face",
+        "three-quarter view character portrait with detailed background elements",
+        "dramatic heroic pose from low angle view",
+        "front-facing portrait with determined gaze",
+        "action pose with character ready for battle",
+        "contemplative side profile with environmental elements",
+        "portrait with character looking directly at viewer"
+    ]
+    
+    # Vylepšené osvětlení pro dramatický efekt
+    lightings = [
+        "dramatic fantasy backlighting with rim light emphasizing silhouette",
+        "soft magical glow illuminating face from below",
+        "cinematic split lighting creating depth and dimension",
+        "golden hour natural light filtering through environment",
+        "dramatic shadows with focused key light highlighting facial features",
+        "ethereal magical lighting matching class abilities",
+        "atmospheric fantasy lighting with volumetric light rays",
+        "professional studio portrait lighting with perfect face illumination"
+    ]
+    
+    # Atmosférické detaily pozadí
+    backgrounds = [
+        "atmospheric fantasy environment matching character theme",
+        "blurred mystical background with depth of field",
+        "subtle themed environment appropriate to class and race",
+        "dramatic sky with fantasy landscape elements",
+        "atmospheric magical effects surrounding character",
+        "professionally blurred background focusing attention on character",
+        "thematic location suggestion (forest/castle/tavern) without distracting from subject"
+    ]
+    
+    # Výběr lepších detailů osvětlení a nálady pro konzistentní výsledky
+    art_style = random.choice(art_styles)
+    composition = random.choice(compositions)
+    lighting = random.choice(lightings)
+    background = random.choice(backgrounds)
+    mood = random.choice(['determined expression', 'heroic pose', 'character portrait', 'fantasy character profile', 'adventurer stance', 'powerful presence', 'iconic character moment'])
+    details = random.choice(['intricate face details', '8k resolution', 'detailed features', 'professional portrait', 'fantasy character sheet style', 'photorealistic details', 'masterful rendering', 'ultra detailed'])
+    
+    # Získání specifických popisů podle rasy a třídy
+    race_detail = race_descriptions.get(race_name, f"{race_name} appearance")
+    class_detail = class_equipment.get(class_name, f"{class_name} equipment")
+    
+    # Sestavení komplexního promtu ze všech připravených prvků
+    prompt = (
+        f"{gender} {race_name} {class_name}, "
+        f"{race_detail}, {class_detail}, "
+        f"{composition}, {lighting}, {background}, {mood}, "
+        f"fantasy character portrait, {art_style}, {details}, "
+        f"dnd character, for character sheet, 4k, trending on artstation, professional illustration"
+    )
+    
+    # Sestavení komplexního negativního promtu pro lepší výsledky
+    negative_prompt = (
+        "deformed, bad anatomy, disfigured, poorly drawn face, mutation, mutated, "
+        "extra limb, ugly, disgusting, poorly drawn hands, missing limb, floating limbs, "
+        "disconnected limbs, malformed hands, blurry, watermark, text, signature, low quality, "
+        "amateur, distorted face, extra fingers, fewer fingers, bad proportions, cropped head, out of frame, "
+        "bad composition, multiple characters, group photo, cartoon, 3d, anime, drawing, painting, "
+        "bad eyes, crossed eyes, poorly rendered face, bad hands, fused fingers, too many fingers"
+    )
+    
+    # Payload pro API
+    payload = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "steps": 20,
+        "sampler_name": "Euler a",
+        "cfg_scale": 7,
+        "width": 512,
+        "height": 768,
+    }
+
+    generated_image_path = None
+    
+    # Aktualizace stavu generování, pokud byl poskytnut callback
+    if callback:
+        callback("Připravuji generování AI portrétu...", "Příprava", 0.1)
+    
+    try:
+        # Volání Stable Diffusion API
+        url = "http://127.0.0.1:7860/sdapi/v1/txt2img"
+        
+        if callback:
+            callback("Odesílám prompt do AI modelu...", "Komunikace s API", 0.3)
+
+        print("📡 Odesílám požadavek na Stable Diffusion...")    
+        response = requests.post(url, json=payload, timeout=None)  # Zvýšený timeout na 600 sekund
+        response.raise_for_status()  # Vyvolá výjimku při chybě
+
+        if callback:
+            callback("Zpracovávám odpověď z API...", "Zpracování odpovědi", 0.6)
+            
+        result = response.json()
+        if "images" in result and len(result["images"]) > 0:
+            image_data = result["images"][0]
+            
+            if callback:
+                callback("Ukládám vygenerovaný obrázek...", "Ukládání obrázku", 0.8)
+            
+            # Uložení vygenerovaného obrázku na základní cestu
+            with open(output_path, "wb") as f:
+                f.write(base64.b64decode(image_data))
+            
+            generated_image_path = output_path
+            print(f"✅ Obrázek vygenerován a uložen do {output_path}")
+            
+            # Pokud je zapnuté automatické ukládání do portraits adresáře
+            if auto_save_to_portraits:
+                # Vytvoření cesty k adresáři podle rasy a pohlaví
+                portraits_dir = "/Users/user/DNDGEN/DndGEN/dnd/portraits"
+                race_dir = os.path.join(portraits_dir, race_name)
+                gender_dir = os.path.join(race_dir, gender)
+                
+                # Vytvoření adresářů, pokud neexistují
+                os.makedirs(race_dir, exist_ok=True)
+                os.makedirs(gender_dir, exist_ok=True)
+                
+                # Vytvoření jedinečného názvu souboru pomocí časového razítka
+                timestamp = int(time.time())
+                portrait_filename = f"{race_name}_{class_name}_{gender}_{timestamp}.png"
+                portrait_path = os.path.join(gender_dir, portrait_filename)
+                
+                # Kopírování vygenerovaného obrázku do portraits adresáře
+                with open(portrait_path, "wb") as f:
+                    f.write(base64.b64decode(image_data))
+                
+                print(f"✅ Obrázek uložen také do adresáře portrétů: {portrait_path}")
+                generated_image_path = portrait_path
+                
+            if callback:
+                callback("Portrét úspěšně vygenerován!", "Dokončeno", 1.0)
+        else:
+            error_msg = "❌ Nebyly vráceny žádné obrázky z API."
+            print(error_msg)
+            if callback:
+                callback(error_msg, "Chyba", 0)
+    except requests.exceptions.ConnectionError:
+        error_msg = "⚠️ Nelze se připojit k Stable Diffusion API. Server není dostupný."
+        print(error_msg)
+        if callback:
+            callback(error_msg, "Chyba připojení", 0)
+    except requests.exceptions.Timeout:
+        error_msg = "⚠️ Vypršel časový limit pro připojení k Stable Diffusion API."
+        print(error_msg)
+        if callback:
+            callback(error_msg, "Timeout", 0)
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"⚠️ HTTP chyba při komunikaci s API: {e}"
+        print(error_msg)
+        if callback:
+            callback(error_msg, "HTTP chyba", 0)
+    except Exception as e:
+        error_msg = f"⚠️ Chyba při generování obrázku: {e}"
+        print(error_msg)
+        if callback:
+            callback(error_msg, "Neočekávaná chyba", 0)
+
+    # Pokud generování selhalo, pokusíme se vrátit existující portrét
+    if generated_image_path is None:
+        print("ℹ️ Pokus o nalezení existujícího portrétu...")
+        portraits_dir = "/Users/user/DNDGEN/DndGEN/dnd/portraits"
+        race_dir = os.path.join(portraits_dir, race_name)
+        gender_dir = os.path.join(race_dir, gender)
+        
+        if os.path.exists(gender_dir):
+            portrait_files = [f for f in os.listdir(gender_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+            if portrait_files:
+                fallback_portrait = os.path.join(gender_dir, random.choice(portrait_files))
+                print(f"✅ Použit existující portrét: {fallback_portrait}")
+                return fallback_portrait
+        
+        print("⚠️ Nebyly nalezeny žádné existující portréty pro tuto kombinaci rasa/pohlaví.")
+    
+    return generated_image_path
+
+def select_portrait_source_gui(race, char_class, gender):
+    """
+    GUI pro výběr zdroje portrétu: AI generování nebo výběr z existujících.
+    """
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
+
+    root = ctk.CTk()
+    root.title("Vyber zdroj portrétu")
+    root.geometry("400x300")
+
+    choice = {"source": None}
+
+    def select_ai():
+        choice["source"] = "ai"
+        root.after(100, root.destroy)
+
+    def select_preset():
+        choice["source"] = "preset"
+        root.after(100, root.destroy)
+
+    ctk.CTkLabel(
+        root, 
+        text="Vyberte, jak chcete získat portrét:", 
+        font=("Arial", 16)
+    ).pack(pady=20)
+
+    btn_frame = ctk.CTkFrame(root)
+    btn_frame.pack(pady=20)
+
+    ctk.CTkButton(
+        btn_frame, 
+        text="🤖 Vygenerovat pomocí AI", 
+        width=250,
+        height=60,
+        font=("Arial", 14),
+        command=select_ai
+    ).pack(pady=10)
+
+    ctk.CTkButton(
+        btn_frame, 
+        text="🖼️ Vybrat z existujících", 
+        width=250,
+        height=60,
+        font=("Arial", 14),
+        command=select_preset
+    ).pack(pady=10)
+
+    root.mainloop()
+
+    return choice["source"] or "preset"  # Výchozí hodnota je preset
+
+def choose_portrait_gui(race, char_class, gender):
+    """
+    Funkce pro výběr portrétu postavy s podporou AI generování.
+    """
     portraits_dir = "/Users/user/DNDGEN/DndGEN/dnd/portraits"
     race_name = getattr(race, "name", str(race))
     gender_dir = os.path.join(portraits_dir, race_name, gender)
+    
 
+    portrait_source = select_portrait_source_gui(race, char_class, gender)
+    
+    # Pokud uživatel zvolil generování pomocí AI
+    if portrait_source == "ai":
+        ai_generation_window = ctk.CTk()
+        ai_generation_window.title("Generování portrétu pomocí AI")
+        ai_generation_window.geometry("550x900")
+        
+        # Proměnné pro animaci načítání
+        animation_chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+        animation_index = [0]
+        start_time = [time.time()]
+        is_running = [True]
+        generation_step = ["Příprava"]
+        
+        # Hlavní frame pro obsah
+        main_frame = ctk.CTkFrame(ai_generation_window)
+        main_frame.pack(pady=10, padx=10, fill="both", expand=True)
+        
+        # Nadpis
+        ctk.CTkLabel(
+            main_frame,
+            text="Generování AI portrétu",
+            font=("Arial Bold", 20)
+        ).pack(pady=(10, 20))
+        
+        # Animovaný loading indikátor
+        status_frame = ctk.CTkFrame(main_frame)
+        status_frame.pack(pady=10, fill="x", padx=20)
+        
+        
+        # Status label
+        status_label = ctk.CTkLabel(
+            status_frame, 
+            text="Připravuji generování portrétu...",
+            font=("Arial", 16),
+            text_color="#3a7ebf"
+        )
+        status_label.pack(pady=10)
+        
+        # Loading animace
+        loading_frame = ctk.CTkFrame(status_frame, fg_color="transparent")
+        loading_frame.pack(pady=5)
+        
+        loading_label = ctk.CTkLabel(
+            loading_frame, 
+            text="⣾",
+            font=("Arial", 28),
+            text_color="#3a7ebf"
+        )
+        loading_label.pack(side="left", padx=10)
+        
+        # Progress indikátor
+        progress_label = ctk.CTkLabel(
+            loading_frame, 
+            text="(0s)",
+            font=("Arial", 14)
+        )
+        progress_label.pack(side="left", padx=10)
+        
+        # Krok generování
+        step_label = ctk.CTkLabel(
+            status_frame, 
+            text="Krok: Příprava",
+            font=("Arial", 12),
+            text_color="gray"
+        )
+        step_label.pack(pady=5)
+        
+        # Progress bar
+        progress_bar = ctk.CTkProgressBar(status_frame, width=400)
+        progress_bar.pack(pady=10)
+        progress_bar.set(0.1)  # Začínáme na 10%
+        
+        
+        # Tlačítko pro zrušení
+        cancel_button = ctk.CTkButton(
+            status_frame, 
+            text="❌ Zrušit generování", 
+            command=lambda: cancel_generation(),
+            fg_color="#bf3a3a",
+            hover_color="#8f2020",
+            font=("Arial", 14)
+        )
+        cancel_button.pack(pady=10)
+        
+        # Proměnná pro ukládání výsledku
+        generation_result = {"path": None}
+        generation_thread = [None]
+        
+        # Funkce pro aktualizaci animace
+        def update_animation():
+            if is_running[0]:
+                # Aktualizace animace
+                animation_index[0] = (animation_index[0] + 1) % len(animation_chars)
+                loading_label.configure(text=animation_chars[animation_index[0]])
+                
+                # Aktualizace počítadla času
+                elapsed = int(time.time() - start_time[0])
+                progress_label.configure(text=f"({elapsed}s)")
+                
+                # Aktualizace kroku generování
+                step_label.configure(text=f"Krok: {generation_step[0]}")
+                
+                # Naplánování další aktualizace
+                ai_generation_window.after(100, update_animation)
+        
+        def update_status(message, step=None, progress=None):
+            status_label.configure(text=message)
+            
+            if step:
+                generation_step[0] = step
+                step_label.configure(text=f"Krok: {step}")
+            
+            if progress is not None:
+                progress_bar.set(progress)
+                
+            ai_generation_window.update()
+        
+        def cancel_generation():
+            is_running[0] = False
+            update_status("Generování zrušeno. Přepínám na výběr existujících portrétů...", 
+                          step="Zrušeno", progress=0)
+            
+            # Změna barvy indikátorů pro zvýraznění zrušení
+            loading_label.configure(text_color="#bf3a3a")
+            status_label.configure(text_color="#bf3a3a")
+            
+            # Skrytí progress baru
+            progress_bar.set(0)
+            
+            # Pokus o ukončení vlákna generování, pokud existuje a běží
+            if generation_thread[0] is not None and generation_thread[0].is_alive():
+                is_running[0] = False
+            
+            ai_generation_window.after(1500, ai_generation_window.destroy)
+        
+        # Funkce pro zobrazení výsledku generování
+        def show_generated_portrait(portrait_path):
+            is_running[0] = False
+            
+            # Odstraníme animaci načítání a tlačítko zrušení
+            loading_label.pack_forget()
+            progress_label.pack_forget()
+            cancel_button.pack_forget()
+            
+            update_status("✅ Portrét byl úspěšně vygenerován!")
+            
+            # Zobrazíme náhled vygenerovaného obrázku
+            try:
+                pil_img = Image.open(portrait_path).convert("RGBA").resize((400, 500))
+                ctk_img = ctk.CTkImage(light_image=pil_img, size=(400, 500))
+                ai_generation_window.ctk_img = ctk_img  # Uložíme referenci
+                
+                image_frame = ctk.CTkFrame(main_frame)
+                image_frame.pack(pady=10, fill="both", expand=True)
+                
+                image_label = ctk.CTkLabel(image_frame, text="", image=ctk_img)
+                image_label.pack(pady=10)
+                
+                # Tlačítka pro akce
+                button_frame = ctk.CTkFrame(main_frame)
+                button_frame.pack(pady=10, fill="x")
+                
+                # Tlačítko pro potvrzení
+                ctk.CTkButton(
+                    button_frame, 
+                    text="✅ Použít tento portrét", 
+                    command=ai_generation_window.destroy
+                ).pack(side="left", padx=5, expand=True)
+                
+                # Tlačítko pro nové generování
+                ctk.CTkButton(
+                    button_frame, 
+                    text="🔄 Vygenerovat znovu", 
+                    command=lambda: (
+                        image_frame.destroy(),
+                        button_frame.destroy(),
+                        reset_and_generate()
+                    )
+                ).pack(side="left", padx=5, expand=True)
+                
+                # Tlačítko pro návrat k výběru z galerie
+                ctk.CTkButton(
+                    button_frame, 
+                    text="🖼️ Vybrat z galerie", 
+                    command=ai_generation_window.destroy,
+                    fg_color="#555555",
+                    hover_color="#333333"
+                ).pack(side="left", padx=5, expand=True)
+                
+            except Exception as e:
+                update_status(f"⚠️ Portrét byl vygenerován, ale nelze zobrazit náhled: {e}")
+                ctk.CTkButton(
+                    main_frame, 
+                    text="✅ Použít vygenerovaný portrét", 
+                    command=ai_generation_window.destroy
+                ).pack(pady=10)
+        
+        def reset_and_generate():
+            # Reset proměnných pro nové generování
+            is_running[0] = True
+            animation_index[0] = 0
+            start_time[0] = time.time()
+            
+            # Obnovíme ovládací prvky
+            status_label.configure(text="Generuji nový portrét pomocí AI...")
+            loading_label.pack(pady=5)
+            progress_label.pack(pady=5)
+            cancel_button.pack(pady=10)
+            
+            # Spustíme animaci
+            update_animation()
+            
+            # Spustíme nové generování
+            start_generation()
+        
+        def generation_thread_function():
+            temp_path = None  # Inicializace proměnné pro dočasný soubor
+            portrait_path = None  # Inicializace proměnné pro cestu k portrétu
+            
+            try:
+                # Generujeme dočasný soubor s unikátním názvem
+                temp_path = f"temp_portrait_{int(time.time())}_{random.randint(1000, 9999)}.png"
+                
+                # Krok 1: Příprava popisu
+                ai_generation_window.after(0, lambda: 
+                    update_status("Vytvářím detailní popis postavy pro AI...", 
+                                 step="Příprava popisu", progress=0.2))
+                time.sleep(0.5)  # Krátká pauza pro zobrazení kroku
+                
+                # Kontrola, zda proces nebyl přerušen
+                if not is_running[0]:
+                    return
+                
+                # Krok 2: Volání API
+                ai_generation_window.after(0, lambda: 
+                    update_status("Komunikuji s AI - toto může trvat par minut...", 
+                                 step="Volání AI API", progress=0.3))
+                
+                # Voláme funkci pro generování portrétu
+                portrait_path = generate_character_image(
+                    race, 
+                    char_class, 
+                    gender, 
+                    output_path=temp_path
+                )
+                
+                # Krok 3: Zpracování výsledku
+                if portrait_path and is_running[0]:
+                    generation_result["path"] = portrait_path
+                    
+                    # Aktualizace stavu
+                    ai_generation_window.after(0, lambda: 
+                        update_status("Zpracovávám vygenerovaný obrázek...", 
+                                    step="Zpracování výsledku", progress=0.8))
+                    
+                    time.sleep(0.5)  # Krátká pauza pro zobrazení kroku
+                    
+                    # Krok 4: Uložení a zobrazení
+                    ai_generation_window.after(0, lambda: 
+                        update_status("Dokončuji a připravuji náhled...", 
+                                    step="Ukládání obrázku", progress=0.9))
+                    
+                    time.sleep(0.5)  # Krátká pauza pro zobrazení kroku
+                    
+                    # Použijeme after() pro bezpečné volání z vlákna
+                    ai_generation_window.after(500, lambda: show_generated_portrait(portrait_path))
+                elif is_running[0]:
+                    # Pokud generování selhalo, ale nebylo zrušeno
+                    ai_generation_window.after(0, lambda: 
+                        update_status("⚠️ Generování se nezdařilo, přepínám na výběr existujících portrétů.", 
+                                      step="Chyba generování", progress=0.1))
+                    ai_generation_window.after(2000, ai_generation_window.destroy)
+                
+            except requests.exceptions.ConnectionError:
+                if is_running[0]:
+                    ai_generation_window.after(0, lambda: 
+                        update_status("⚠️ Nelze se připojit k Stable Diffusion API. Server není dostupný.",
+                                      step="Chyba připojení", progress=0.1))
+                    ai_generation_window.after(2000, ai_generation_window.destroy)
+            except requests.exceptions.Timeout:
+                if is_running[0]:
+                    ai_generation_window.after(0, lambda: 
+                        update_status("⚠️ Vypršel časový limit pro připojení k API. Zkuste to později.",
+                                      step="Vypršení časového limitu", progress=0.1))
+                    ai_generation_window.after(2000, ai_generation_window.destroy)
+            except Exception as e:
+                if is_running[0]:  # Pouze pokud proces nebyl zrušen
+                    ai_generation_window.after(0, lambda: 
+                        update_status(f"❌ Chyba při generování portrétu: {e}\nPřepínám na výběr existujících portrétů.",
+                                      step="Neočekávaná chyba", progress=0.1))
+                    ai_generation_window.after(2000, ai_generation_window.destroy)
+            finally:
+                # Vyčištění dočasných souborů na konci procesu, pokud existují
+                try:
+                    if 'temp_path' in locals() and os.path.exists(temp_path) and temp_path.startswith('temp_portrait_'):
+                        # Kontrolujeme, zda jde o dočasný soubor, abychom nesmazali důležité soubory
+                        if portrait_path != temp_path:  # Nesmazat, pokud je to finální cesta
+                            os.remove(temp_path)
+                            print(f"✅ Dočasný soubor {temp_path} byl odstraněn")
+                except Exception as e:
+                    print(f"⚠️ Nepodařilo se odstranit dočasný soubor: {e}")
+        
+        def start_generation():
+            # Spustíme generování v novém vlákně
+            generation_thread[0] = threading.Thread(target=generation_thread_function)
+            generation_thread[0].daemon = True  # Vlákno se ukončí s hlavním programem
+            generation_thread[0].start()
+        
+        # Spustíme animaci
+        update_animation()
+        
+        # Spustíme generování až po zobrazení okna
+        start_generation()
+        ai_generation_window.mainloop()
+        
+        # Vrátíme cestu k vygenerovanému portrétu, pokud byla generace úspěšná
+        if generation_result["path"]:
+            return generation_result["path"]
+        # Jinak pokračujeme výběrem existujících portrétů
+    
+    # Kontrola adresáře s portréty
     if not os.path.exists(gender_dir):
         print(f"❌ Složka pro {race_name} a {gender} neexistuje.")
         return None
@@ -587,7 +1135,12 @@ def choose_portrait_gui(race, gender):
     root.geometry("650x670")
     root.title(f"Výběr portrétu pro {race_name} ({gender})")
     index = ctk.IntVar(value=0)
-    image_label = ctk.CTkLabel(root, text="")
+
+    # Scrollable frame for images
+    scrollable_frame = ctk.CTkScrollableFrame(root, width=600, height=600)
+    scrollable_frame.pack(pady=10, padx=10, fill="both", expand=True)
+
+    image_label = ctk.CTkLabel(scrollable_frame, text="")
     image_label.pack(pady=10)
 
     image_cache = {}
@@ -738,23 +1291,21 @@ def set_ac(character):
 
     return base_ac  # Pokud není žádné brnění, vrátí základní AC
 
-
-# generetor postavy
 def generate_character():
     print("\n=== GENERÁTOR POSTAV D&D 5E ===\n")
     race_key = choose_option_gui(list(races.keys()), "Vyber rasu:")  # hráč vybírá jméno (text)
-    race = races[race_key] # získá objekt rasy podle klíče
-    char_class = choose_option_gui(classes, "Vyber povolání:") # hráč vybírá objekt povolání
-    background = choose_option_gui(backgrounds, "Vyber zázemí:") # hráč vybírá objekt zázemí
+    race = races[race_key]
+    char_class = choose_option_gui(classes, "Vyber povolání:")
+    background = choose_option_gui(backgrounds, "Vyber zázemí:")
     gender = choose_gender_gui()
     name = generate_name_gui(race, gender)
-    portrait = choose_portrait_gui(race, gender)
+    portrait = choose_portrait_gui(race, char_class, gender)
     stats = assign_stats_gui(char_class.name)
-    stats_dict = dict(stats) # Převod na slovník pro snadnější manipulaci
-    stats_with_race = race.apply_modifiers(stats_dict)  
+    stats_dict = dict(stats)
+    stats_with_race = race.apply_modifiers(stats_dict) 
     skills = []  # Initialize skills
     traits = []  # Initialize traits
-    character = Character(name, race, char_class, background, hit_dice, skills, traits, generate_items=generate_items)
+    character = Character( name, race, char_class, background, hit_dice, skills, traits, generate_items= generate_items)
     character.stats = stats_with_race
     constitution_mod = character.stats.get("Constitution", 0)  # Modifikátor Constitution
     character.hit_dice, character.hp = calculate_hit_points(char_class, constitution_mod)
@@ -764,7 +1315,7 @@ def generate_character():
     char_class.apply_class_bonus(character)
     character.path = generate_path(char_class.name) if char_class.name in path_classy else None
     character.portrait = portrait # Replace with a valid default path
-    show_character_options(character)
+    return character
 
 def display_character_info(character):
      info_window = ctk.CTkToplevel()
@@ -1060,9 +1611,6 @@ def open_character_journal(character):
 
 def save_character_to_json(character, filename):
     """Uloží charakter do JSON souboru."""
-    os.makedirs("characters(json)", exist_ok=True)  # Vytvoří složku 'characters', pokud neexistuje
-    filepath = os.path.join("/Users/user/DNDGEN/DndGEN/dnd/characters(json)", filename)  # Cesta k souboru ve složce 'characters'
-    
     character_data = {
         "name": character.name,
         "race": character.race.name if hasattr(character.race, "name") else str(character.race),
@@ -1078,14 +1626,14 @@ def save_character_to_json(character, filename):
         "portrait": character.portrait,
         "path": character.path
     }
-    with open(filepath, "w") as f:
+    with open(filename, "w") as f:
         json.dump(character_data, f, indent=4)
-    print(f"✅ Postava {character.name} byla uložena do {filepath}!")
+    print(f"✅ Postava {character.name} byla uložena do {filename}!")
 
 def show_character_options(character):
     root = ctk.CTk()
     root.title(f"Možnosti pro {character.name}")
-    root.geometry("250x500")
+    root.geometry("250x200")
     # Tlačítko pro zobrazení deníku
     ctk.CTkButton(root, text="📜 Zobrazit informace", command=lambda: display_character_info(character)).pack(pady=10)
 
@@ -1096,12 +1644,11 @@ def show_character_options(character):
     
     ctk.CTkButton(root, text="💬Exportovat do JSON", command=lambda: (save_character_to_json(character, "my_character.json"))).pack(pady=10)
 
-    ctk.CTkButton(root, text="❌ Zavřít generator", command=sys.exit).pack(pady=10)
+    ctk.CTkButton(root, text="❌ Zavřít generator", command=root.destroy).pack(pady=10)
     root.mainloop()
 
-if __name__ == "__main__":
-    show_main_menu()
-
+character = generate_character()
+show_character_options(character)
 
 
 

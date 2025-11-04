@@ -11,7 +11,7 @@ class Character:
         self.trait = self.set_traits()
         self.char_spells= char_spells
         self.inventory = generate_items(self.char_class.name)
-        self.features = []  # Initialize features as an empty list
+        self.features = [] 
         self.spells = {"cantrips": [], "spells": []} 
 
     def set_skills(self):
