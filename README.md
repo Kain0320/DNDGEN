@@ -23,7 +23,7 @@ Instalace
 Klonování projektu:
 
 Bash
-git clone https://github.com/vittasv/dnd-generator.git
+git clone [https://github.com/vittasv/dnd-generator.git](https://github.com/Kain0320/DNDGEN.git)
 Instalace knihoven:
 
 Bash
