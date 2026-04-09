@@ -6,8 +6,6 @@ Kompletní Generátor: Výběr rasy, třídy (včetně podtříd) a zázemí (Ba
 
 Inteligentní Statistiky: Podpora pro Standard Array, Point Buy nebo animované házení kostkou (4d6 drop lowest).
 
-AI Portréty: Integrace se Stable Diffusion pro generování vizuální podoby postavy na základě rasy, pohlaví a povolání.
-
 Dynamický Inventář a Kouzla: Automatický výběr startovního vybavení a interaktivní výběr kouzel s popisy.
 
 Export do PDF: Automatické vyplnění oficiálního D&D Character Sheetu včetně portrétu.
